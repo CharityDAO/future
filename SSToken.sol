@@ -1,4 +1,4 @@
-pragma solidity ^0.4.0;
+pragma solidity ^0.4.4;
 
 contract Owned {
     /// Allows only the owner to call a function
@@ -15,6 +15,16 @@ contract Owned {
     }
 }
 
+
+// Rename the token. Possible names
+// FlakyToken
+// HierachableToken
+// ClonableToken
+// ForkToken
+// MagikToken
+// SplitableToken
+// MutableToken
+
 contract SSToken is Owned {
 
     string public name;                   //fancy name: eg Simon Bucks
@@ -22,12 +32,30 @@ contract SSToken is Owned {
     string public symbol;                 //An identifier: eg SBX
     string public version = 'H0.1';       //human 0.1 standard. Just an arbitrary versioning scheme.
 
+    struct  Checkpoint {
+        // snapshot when starts to take effect this assignation
+        uint fromBlock;
+        // balance assigned to token holder from this snapshot
+        uint value;
+    }
+
+    SSToken parentToken;
+    uint parentSnapShotBlock;
+    mapping (address => Checkpoint[]) balances;
+    mapping (address => mapping (address => uint256)) allowed;
+    Checkpoint[] totalSupplyHistory;
+    bool public isConstant;
 
     SSTokenFactory tokenFactory;
+
+////////////////
+// Constructor
+////////////////
+
     function SSToken(
         address _tokenFactory,
         address _parentToken,
-        uint _parentSnapShot,
+        uint _parentSnapShotBlock,
         string _tokenName,
         uint8 _decimalUnits,
         string _tokenSymbol,
@@ -38,9 +66,14 @@ contract SSToken is Owned {
         decimals = _decimalUnits;                            // Amount of decimals for display purposes
         symbol = _tokenSymbol;                              // Set the symbol for display purposes
         parentToken = SSToken(_parentToken);
-        parentSnapShot = _parentSnapShot;
+        parentSnapShotBlock = _parentSnapShotBlock;
         isConstant = _isConstant;
     }
+
+
+////////////////
+// ERC20 Interface
+////////////////
 
     function transfer(address _to, uint256 _value) returns (bool success) {
 
@@ -52,12 +85,38 @@ contract SSToken is Owned {
         //if (balances[_from] >= _value && allowed[_from][msg.sender] >= _value && balances[_to] + _value > balances[_to]) {
 
         if (isConstant) throw;
-        if (allowed[_from][msg.sender] < _value) return false;
+        if ((msg.sender != owner) && (allowed[_from][msg.sender] < _value)) return false;
         doTransfer(_from, _to, _value);
     }
 
+    function doTransfer(address _from, address _to, uint _value) internal returns(bool) {
+
+           if (_value == 0) {
+               return true;
+           }
+
+           // Do not allow transfer to this
+           if ((_to == 0) || (_to == address(this))) throw;
+
+           // Remove _from votes
+           var previousBalanceFrom = balanceOfAt(_from, block.number);
+           if (previousBalanceFrom < _value) {
+               return false;
+           }
+
+           updateValueAtNow(balances[_from], previousBalanceFrom - _value);
+
+           var previousBalanceTo = balanceOfAt(_to, block.number);
+           updateValueAtNow(balances[_to], previousBalanceTo + _value);
+
+           Transfer(_from, _to, _value);
+
+           return true;
+    }
+
+
     function balanceOf(address _owner) constant returns (uint256 balance) {
-        return balanceOfAt(_owner, nSnapshots);
+        return getValueAt(balances[_owner], block.number);
     }
 
     function approve(address _spender, uint256 _value) returns (bool success) {
@@ -85,117 +144,106 @@ contract SSToken is Owned {
     }
 
     function totalSupply() returns (uint) {
-        return totalSupplyAt[nSnapshots];
+        return getValueAt(totalSupplyHistory,block.number);
     }
 
-    struct  BalanceCheckPoint {
-        // snapshot when starts to take effect this assignation
-        uint fromSnapshot;
-        // balance assigned to token holder from this snapshot
-        uint balance;
+
+////////////////
+// Query balance and totalSupply in History
+////////////////
+
+    function balanceOfAt(address _holder, uint _blockNumber) constant returns (uint) {
+        return getValueAt( balances[_holder], _blockNumber);
     }
 
-    SSToken parentToken;
-    uint parentSnapShot;
-    mapping (address => BalanceCheckPoint[]) balances;
-    mapping (address => mapping (address => uint256)) allowed;
-    uint public nSnapshots;
-    mapping (uint => uint) public totalSupplyAt;
-    bool public isConstant;
+    function totalSupplyAt(uint _blockNumber) constant returns(uint) {
+        return getValueAt( totalSupplyHistory, _blockNumber);
+    }
+
+////////////////
+// Create a child token from an snapshot of this token at a given block
+////////////////
+
+    function createChildToken(string _childTokenName, uint8 _childDecimalUnits, string _childTokenSymbol, bool _isConstant, uint _snapshotBlock) {
+        if (_snapshotBlock > block.number) _snapshotBlock = block.number;
+        SSToken childToken = tokenFactory.createChildToken(this, _snapshotBlock, _childTokenName, _childDecimalUnits, _childTokenSymbol, _isConstant);
+        NewChildToken(_snapshotBlock, childToken);
+    }
 
 
-    function balanceOfAt(address _holder, uint _snapshot) constant returns (uint) {
+////////////////
+// Generate and destroy tokens
+////////////////
 
-            uint b;
+    function generateTokens(address _dest, uint _value) onlyOwner {
+        if (isConstant) throw;
+        uint curTotalSupply = getValueAt(totalSupplyHistory, block.number);
+        updateValueAtNow(totalSupplyHistory, curTotalSupply + _value);
+        var previousBalanceTo = balanceOf(_dest);
+        updateValueAtNow(balances[_dest], previousBalanceTo + _value);
+        Transfer(0, _dest, _value);
+    }
 
-            BalanceCheckPoint[] snapshots = balances[_holder];
+    function destroyTokens(address _from, uint _value) onlyOwner {
+        if (isConstant) throw;
+        uint curTotalSupply = getValueAt(totalSupplyHistory, block.number);
+        if (curTotalSupply < _value) throw;
+        updateValueAtNow(totalSupplyHistory, curTotalSupply - _value);
+        var previousBalanceFrom = balanceOf(_from);
+        if (previousBalanceFrom < _value) throw;
+        updateValueAtNow(balances[_from], previousBalanceFrom + _value);
+        Transfer(_from, 0, _value);
+    }
 
-            uint i;
 
-            for (i = snapshots.length; i>0; i-- ) {
-                BalanceCheckPoint snapShot = snapshots[i-1];
-                if (nSnapshots >= snapShot.fromSnapshot) return snapShot.balance;
+////////////////
+// Internal helper functions to query and set a value in a snapshot array
+////////////////
+
+    function getValueAt(Checkpoint[] storage checkpoints, uint _block) constant internal returns (uint) {
+        if (checkpoints.length == 0) return 0;
+        if (_block < checkpoints[0].fromBlock) return 0;
+        uint min = 0;
+        uint max = checkpoints.length-1;
+        while (max > min) {
+            uint mid = (max + min + 1)/ 2;
+            if (checkpoints[mid].fromBlock<=_block) {
+                min = mid;
+            } else {
+                max = mid-1;
             }
-
-            return (address(parentToken) != 0) ? parentToken.balanceOfAt(_holder, parentSnapShot) : 0;
+        }
+        return checkpoints[min].value;
     }
 
-    function doTransfer(address _from, address _to, uint _value) internal returns(bool) {
-
-           if (_value == 0) {
-               return true;
-           }
-
-          // Remove _from votes
-           var previousBalanceFrom = balanceOfAt(_from, nSnapshots);
-           if (previousBalanceFrom < _value) {
-               return false;
-           }
-
-           updateBalance(_from, previousBalanceFrom - _value);
-
-           var previousBalanceTo = balanceOfAt(_to, nSnapshots);
-           updateBalance(_to, previousBalanceTo + _value);
-
-           Transfer(_from, _to, _value);
-
-           return true;
-    }
-
-    function updateBalance(address _holder, uint _balance) internal  {
-           BalanceCheckPoint[] snapshots = balances[_holder];
-
-           if ((snapshots.length == 0) || (snapshots[snapshots.length -1].fromSnapshot < nSnapshots)) {
-               BalanceCheckPoint newSnapshot = snapshots[ snapshots.length++ ];
-               newSnapshot.fromSnapshot = nSnapshots;
-               newSnapshot.balance = _balance;
+    function updateValueAtNow(Checkpoint[] storage checkpoints, uint _value) internal  {
+           if ((checkpoints.length == 0) || (checkpoints[checkpoints.length -1].fromBlock < block.number)) {
+               Checkpoint newCheckPoint = checkpoints[ checkpoints.length++ ];
+               newCheckPoint.fromBlock =  block.number;
+               newCheckPoint.value = _value;
            } else {
-               BalanceCheckPoint oldSnapshot = snapshots[snapshots.length-1];
-               oldSnapshot.balance = _balance;
+               Checkpoint oldCheckPoint = checkpoints[checkpoints.length-1];
+               oldCheckPoint.value = _value;
            }
     }
 
-    function createSnapshot() onlyOwner {
-        if (isConstant) throw;
-        NewSnapshot(nSnapshots ++);
-    }
-
-    function createChildToken(uint _snapshot, string _childTokenName, uint8 _childDecimalUnits, string _childTokenSymbol, bool _isConstant) {
-        if ((_snapshot == nSnapshots)&&(!isConstant)) createSnapshot();
-
-        SSToken childToken = tokenFactory.createChildToken(this, _snapshot, _childTokenName, _childDecimalUnits, _childTokenSymbol, _isConstant);
-        NewChildToken(_snapshot, childToken);
-    }
-
-    function createTokens(address _dest, uint _value) onlyOwner {
-        if (isConstant) throw;
-        totalSupplyAt[nSnapshots] += _value;
-        var previousBalanceTo = balanceOfAt(_dest, nSnapshots);
-        updateBalance(_dest, previousBalanceTo + _value);
-        NewTokens(_dest, _value);
-    }
 
     event Transfer(address indexed _from, address indexed _to, uint256 _value);
     event Approval(address indexed _owner, address indexed _spender, uint256 _value);
-    event NewSnapshot(uint _snapshot);
-    event NewChildToken(uint _snapshot, address _childToken);
-    event NewTokens(address _dest, uint _value);
+    event NewChildToken(uint _snapshotBlock, address _childToken);
 
 }
 
 contract SSTokenFactory {
     function createChildToken(
         address _parentToken,
-        uint _snapshot,
+        uint _snapshotBlock,
         string _tokenName,
         uint8 _decimalUnits,
         string _tokenSymbol,
         bool _isConstant
     ) returns (SSToken) {
-        SSToken newToken = new SSToken(this, _parentToken, _snapshot, _tokenName, _decimalUnits, _tokenSymbol, _isConstant);
+        SSToken newToken = new SSToken(this, _parentToken, _snapshotBlock, _tokenName, _decimalUnits, _tokenSymbol, _isConstant);
         return newToken;
     }
 }
-
-
-
