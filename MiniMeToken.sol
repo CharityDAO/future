@@ -15,17 +15,7 @@ contract Owned {
     }
 }
 
-
-// Rename the token. Possible names
-// FlakyToken
-// HierachableToken
-// ClonableToken
-// ForkToken
-// MagikToken
-// SplitableToken
-// MutableToken
-
-contract SSToken is Owned {
+contract MiniMeToken is Owned {
 
     string public name;                   //fancy name: eg Simon Bucks
     uint8 public decimals;                //How many decimals to show. ie. There could 1000 base units with 3 decimals. Meaning 0.980 SBX = 980 base units. It's like comparing 1 wei to 1 ether.
@@ -39,20 +29,21 @@ contract SSToken is Owned {
         uint value;
     }
 
-    SSToken parentToken;
-    uint parentSnapShotBlock;
+    MiniMeToken public parentToken;
+    uint public parentSnapShotBlock;
+    uint public creationBlock;
     mapping (address => Checkpoint[]) balances;
     mapping (address => mapping (address => uint256)) allowed;
     Checkpoint[] totalSupplyHistory;
     bool public isConstant;
 
-    SSTokenFactory tokenFactory;
+    MiniMeTokenFactory public tokenFactory;
 
 ////////////////
 // Constructor
 ////////////////
 
-    function SSToken(
+    function MiniMeToken(
         address _tokenFactory,
         address _parentToken,
         uint _parentSnapShotBlock,
@@ -61,13 +52,14 @@ contract SSToken is Owned {
         string _tokenSymbol,
         bool _isConstant
         ) {
-        tokenFactory = SSTokenFactory(_tokenFactory);
+        tokenFactory = MiniMeTokenFactory(_tokenFactory);
         name = _tokenName;                                   // Set the name for display purposes
         decimals = _decimalUnits;                            // Amount of decimals for display purposes
         symbol = _tokenSymbol;                              // Set the symbol for display purposes
-        parentToken = SSToken(_parentToken);
+        parentToken = MiniMeToken(_parentToken);
         parentSnapShotBlock = _parentSnapShotBlock;
         isConstant = _isConstant;
+        creationBlock = block.number;
     }
 
 
@@ -86,6 +78,7 @@ contract SSToken is Owned {
 
         if (isConstant) throw;
         if ((msg.sender != owner) && (allowed[_from][msg.sender] < _value)) return false;
+        allowed[_from][msg.sender] -= _value;
         doTransfer(_from, _to, _value);
     }
 
@@ -116,7 +109,7 @@ contract SSToken is Owned {
 
 
     function balanceOf(address _owner) constant returns (uint256 balance) {
-        return getValueAt(balances[_owner], block.number);
+        return balanceOfAt(_owner, block.number);
     }
 
     function approve(address _spender, uint256 _value) returns (bool success) {
@@ -143,8 +136,8 @@ contract SSToken is Owned {
         return true;
     }
 
-    function totalSupply() returns (uint) {
-        return getValueAt(totalSupplyHistory,block.number);
+    function totalSupply() constant returns (uint) {
+        return totalSupplyAt(block.number);
     }
 
 
@@ -153,21 +146,44 @@ contract SSToken is Owned {
 ////////////////
 
     function balanceOfAt(address _holder, uint _blockNumber) constant returns (uint) {
-        return getValueAt( balances[_holder], _blockNumber);
+
+        if (_blockNumber < creationBlock) {
+            return 0;
+        } else if ((balances[_holder].length == 0) || (balances[_holder][0].fromBlock > _blockNumber)) {
+            if (address(parentToken) != 0) {
+                return parentToken.balanceOfAt(_holder, parentSnapShotBlock);
+            } else {
+                return 0;
+            }
+        } else {
+            return getValueAt( balances[_holder], _blockNumber);
+        }
+
     }
 
     function totalSupplyAt(uint _blockNumber) constant returns(uint) {
-        return getValueAt( totalSupplyHistory, _blockNumber);
+        if (_blockNumber < creationBlock) {
+            return 0;
+        } else if ((totalSupplyHistory.length == 0) || (totalSupplyHistory[0].fromBlock > _blockNumber)) {
+            if (address(parentToken) != 0) {
+                return parentToken.totalSupplyAt(parentSnapShotBlock);
+            } else {
+                return 0;
+            }
+        } else {
+            return getValueAt( totalSupplyHistory, _blockNumber);
+        }
     }
 
 ////////////////
 // Create a child token from an snapshot of this token at a given block
 ////////////////
 
-    function createChildToken(string _childTokenName, uint8 _childDecimalUnits, string _childTokenSymbol, bool _isConstant, uint _snapshotBlock) {
+    function createChildToken(string _childTokenName, uint8 _childDecimalUnits, string _childTokenSymbol, uint _snapshotBlock, bool _isConstant) returns(address) {
         if (_snapshotBlock > block.number) _snapshotBlock = block.number;
-        SSToken childToken = tokenFactory.createChildToken(this, _snapshotBlock, _childTokenName, _childDecimalUnits, _childTokenSymbol, _isConstant);
-        NewChildToken(_snapshotBlock, childToken);
+        MiniMeToken childToken = tokenFactory.createChildToken(this, _snapshotBlock, _childTokenName, _childDecimalUnits, _childTokenSymbol, _isConstant);
+        NewChildToken(address(childToken), _snapshotBlock);
+        return address(childToken);
     }
 
 
@@ -191,7 +207,7 @@ contract SSToken is Owned {
         updateValueAtNow(totalSupplyHistory, curTotalSupply - _value);
         var previousBalanceFrom = balanceOf(_from);
         if (previousBalanceFrom < _value) throw;
-        updateValueAtNow(balances[_from], previousBalanceFrom + _value);
+        updateValueAtNow(balances[_from], previousBalanceFrom - _value);
         Transfer(_from, 0, _value);
     }
 
@@ -202,6 +218,8 @@ contract SSToken is Owned {
 
     function getValueAt(Checkpoint[] storage checkpoints, uint _block) constant internal returns (uint) {
         if (checkpoints.length == 0) return 0;
+        //Shorcut for the actual value
+        if (_block >= checkpoints[checkpoints.length-1].fromBlock) return checkpoints[checkpoints.length-1].value;
         if (_block < checkpoints[0].fromBlock) return 0;
         uint min = 0;
         uint max = checkpoints.length-1;
@@ -230,11 +248,11 @@ contract SSToken is Owned {
 
     event Transfer(address indexed _from, address indexed _to, uint256 _value);
     event Approval(address indexed _owner, address indexed _spender, uint256 _value);
-    event NewChildToken(uint _snapshotBlock, address _childToken);
+    event NewChildToken(address indexed _childToken, uint _snapshotBlock);
 
 }
 
-contract SSTokenFactory {
+contract MiniMeTokenFactory {
     function createChildToken(
         address _parentToken,
         uint _snapshotBlock,
@@ -242,8 +260,8 @@ contract SSTokenFactory {
         uint8 _decimalUnits,
         string _tokenSymbol,
         bool _isConstant
-    ) returns (SSToken) {
-        SSToken newToken = new SSToken(this, _parentToken, _snapshotBlock, _tokenName, _decimalUnits, _tokenSymbol, _isConstant);
+    ) returns (MiniMeToken) {
+        MiniMeToken newToken = new MiniMeToken(this, _parentToken, _snapshotBlock, _tokenName, _decimalUnits, _tokenSymbol, _isConstant);
         return newToken;
     }
 }
