@@ -77,9 +77,11 @@ contract MiniMeToken is Owned {
         //if (balances[_from] >= _value && allowed[_from][msg.sender] >= _value && balances[_to] + _value > balances[_to]) {
 
         if (isConstant) throw;
-        if ((msg.sender != owner) && (allowed[_from][msg.sender] < _value)) return false;
-        allowed[_from][msg.sender] -= _value;
-        doTransfer(_from, _to, _value);
+        if (msg.sender != owner) {
+            if (allowed[_from][msg.sender] < _value) return false;
+            allowed[_from][msg.sender] -= _value;
+        }
+        return doTransfer(_from, _to, _value);
     }
 
     function doTransfer(address _from, address _to, uint _value) internal returns(bool) {
@@ -191,26 +193,33 @@ contract MiniMeToken is Owned {
 // Generate and destroy tokens
 ////////////////
 
-    function generateTokens(address _dest, uint _value) onlyOwner {
+    function generateTokens(address _holder, uint _value) onlyOwner {
         if (isConstant) throw;
         uint curTotalSupply = getValueAt(totalSupplyHistory, block.number);
         updateValueAtNow(totalSupplyHistory, curTotalSupply + _value);
-        var previousBalanceTo = balanceOf(_dest);
-        updateValueAtNow(balances[_dest], previousBalanceTo + _value);
-        Transfer(0, _dest, _value);
+        var previousBalanceTo = balanceOf(_holder);
+        updateValueAtNow(balances[_holder], previousBalanceTo + _value);
+        Transfer(0, _holder, _value);
     }
 
-    function destroyTokens(address _from, uint _value) onlyOwner {
+    function destroyTokens(address _holder, uint _value) onlyOwner {
         if (isConstant) throw;
         uint curTotalSupply = getValueAt(totalSupplyHistory, block.number);
         if (curTotalSupply < _value) throw;
         updateValueAtNow(totalSupplyHistory, curTotalSupply - _value);
-        var previousBalanceFrom = balanceOf(_from);
+        var previousBalanceFrom = balanceOf(_holder);
         if (previousBalanceFrom < _value) throw;
-        updateValueAtNow(balances[_from], previousBalanceFrom - _value);
-        Transfer(_from, 0, _value);
+        updateValueAtNow(balances[_holder], previousBalanceFrom - _value);
+        Transfer(_holder, 0, _value);
     }
 
+////////////////
+// Constant tokens
+////////////////
+
+    function setConstant(bool _isConstant) onlyOwner {
+        isConstant = _isConstant;
+    }
 
 ////////////////
 // Internal helper functions to query and set a value in a snapshot array
