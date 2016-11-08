@@ -37,7 +37,6 @@ contract Milestones {
 
 
     function forceApproveMileston(uint _idMilestone) onlyArbitrator;
-    function forceRejectMilestone(uint _idMilestone) onlyArbitrator;
 
     function cancelCampaign() onlyArbitrator;
 
